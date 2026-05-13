@@ -195,7 +195,28 @@ func parseSMTP(banner string) (string, string) {
 		return "smtp", fmt.Sprintf("Sendmail %s", match[1])
 	}
 
+	if generic := parseGenericSMTPVersion(banner); generic != "" {
+		return "smtp", generic
+	}
+
 	return "smtp", ""
+}
+
+func parseGenericSMTPVersion(banner string) string {
+	line := firstMatchingLine(banner, func(line string) bool {
+		upper := strings.ToUpper(line)
+		return strings.HasPrefix(line, "220") && (strings.Contains(upper, "SMTP") || strings.Contains(upper, "ESMTP"))
+	})
+	line = regexp.MustCompile(`^220[\s-]*`).ReplaceAllString(strings.TrimSpace(line), "")
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	fields := strings.Fields(line)
+	if len(fields) > 1 && strings.Contains(fields[0], ".") {
+		line = strings.Join(fields[1:], " ")
+	}
+	return sanitizeVersionString(line)
 }
 
 // parsePOP3 extracts POP3 server information
@@ -216,7 +237,23 @@ func parsePOP3(banner string) (string, string) {
 		return "pop3", "Courier POP3"
 	}
 
+	if generic := parseGenericPOP3Version(banner); generic != "" {
+		return "pop3", generic
+	}
+
 	return "pop3", ""
+}
+
+func parseGenericPOP3Version(banner string) string {
+	line := firstMatchingLine(banner, func(line string) bool {
+		return strings.HasPrefix(strings.TrimSpace(line), "+OK")
+	})
+	line = regexp.MustCompile(`^\+OK[\s-]*`).ReplaceAllString(strings.TrimSpace(line), "")
+	line = strings.TrimSpace(line)
+	if line == "" || strings.EqualFold(line, "ready") || strings.EqualFold(line, "logging out") {
+		return ""
+	}
+	return sanitizeVersionString(line)
 }
 
 // parseIMAP extracts IMAP server information
@@ -234,7 +271,41 @@ func parseIMAP(banner string) (string, string) {
 		return "imap", "Courier IMAP"
 	}
 
-	return "imap", ""
+	if generic := parseGenericIMAPVersion(banner); generic != "" {
+		return "imap", generic
+	}
+
+	return "imap", "IMAP4rev1"
+}
+
+func parseGenericIMAPVersion(banner string) string {
+	line := firstMatchingLine(banner, func(line string) bool {
+		trimmed := strings.TrimSpace(line)
+		return strings.HasPrefix(strings.ToUpper(trimmed), "* OK") && strings.Contains(strings.ToUpper(trimmed), "IMAP")
+	})
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	afterCapability := regexp.MustCompile(`(?i).*?\]\s*`).ReplaceAllString(line, "")
+	afterCapability = sanitizeVersionString(afterCapability)
+	if afterCapability != "" && !strings.HasPrefix(strings.ToUpper(afterCapability), "HTB{") {
+		return afterCapability
+	}
+	if strings.Contains(strings.ToUpper(line), "IMAP4REV1") {
+		return "IMAP4rev1"
+	}
+	return ""
+}
+
+func firstMatchingLine(text string, match func(string) bool) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(strings.TrimRight(line, "\r"))
+		if match(line) {
+			return line
+		}
+	}
+	return ""
 }
 
 // parseFTP extracts FTP server information

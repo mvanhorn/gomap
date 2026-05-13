@@ -30,7 +30,7 @@ func TestOutputFormatterGolden(t *testing.T) {
 			Version:     "Windows Server 2008 R2",
 			LatencyMs:   4,
 			Confidence:  "high",
-			Evidence:    "nmap smb-os-discovery",
+			Evidence:    "raw smb negotiate",
 		},
 	}
 

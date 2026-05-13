@@ -22,6 +22,12 @@ func TestParseSMTP(t *testing.T) {
 			version: "Exim 4.96",
 		},
 		{
+			name:    "Generic product",
+			banner:  "220 InFreight ESMTP v2.11\r\n250-mail1",
+			service: "smtp",
+			version: "InFreight ESMTP v2.11",
+		},
+		{
 			name:    "No SMTP",
 			banner:  "HTTP/1.1 200 OK",
 			service: "",
@@ -74,10 +80,18 @@ func TestParsePOP3AndIMAP(t *testing.T) {
 	if pop3Service != "pop3" || pop3Version != "Dovecot" {
 		t.Fatalf("unexpected POP3 parse result: (%q,%q)", pop3Service, pop3Version)
 	}
+	genericPOP3Service, genericPOP3Version := parsePOP3("+OK InFreight POP3 v9.188")
+	if genericPOP3Service != "pop3" || genericPOP3Version != "InFreight POP3 v9.188" {
+		t.Fatalf("unexpected generic POP3 parse result: (%q,%q)", genericPOP3Service, genericPOP3Version)
+	}
 
 	imapService, imapVersion := parseIMAP("* OK [CAPABILITY IMAP4rev1] Dovecot ready.")
 	if imapService != "imap" || imapVersion != "Dovecot IMAP" {
 		t.Fatalf("unexpected IMAP parse result: (%q,%q)", imapService, imapVersion)
+	}
+	genericIMAPService, genericIMAPVersion := parseIMAP("* OK [CAPABILITY IMAP4rev1 SASL-IR] HTB{redacted}")
+	if genericIMAPService != "imap" || genericIMAPVersion != "IMAP4rev1" {
+		t.Fatalf("unexpected generic IMAP parse result: (%q,%q)", genericIMAPService, genericIMAPVersion)
 	}
 }
 

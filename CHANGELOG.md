@@ -9,20 +9,38 @@ Note: this changelog is maintained from this point forward in the project histor
 ### Added
 
 ### Changed
-- Refined README positioning around authorized reconnaissance, structured output, low-noise profiles, and automation-friendly CLI usage.
 
 ### Fixed
+
+## [2.4.8] - 2026-05-13
+
+### Added
+- **MySQL X Protocol mapping**: port `33060` is now identified as `mysqlx` with a clear `MySQL X Protocol service` hint.
+- **HTB performance benchmark**: README now documents measured quick-scan and full-port scan timings against an authorized Hack The Box lab target.
+
+### Changed
+- **Native-only service detection**: scanner-side SMB and service fingerprinting paths no longer shell out to external tools such as `nmap`, `smbclient`, or `rpcclient`.
+- **Bounded service probes**: SMTP, POP3, IMAP, and MySQL probes now use tighter service-detection windows so silent services do not dominate total scan time.
+- **README positioning**: documentation now emphasizes authorized reconnaissance, structured output, low-noise profiles, and automation-friendly CLI usage.
+- **Benchmark documentation**: replaced the old Snort lab benchmark with current HTB quick-scan and full-port measurements.
+
+### Fixed
+- **Silent MySQL reporting**: open MySQL ports that do not emit a standard handshake now report `MySQL service (no handshake)` instead of leaving the version column empty.
+- **Silent SMTP reporting**: open SMTP ports that do not return a greeting now report `SMTP service (no greeting)` instead of leaving the version column empty.
+- **MySQL scan latency**: MySQL detection now reads from the already-open scan connection and avoids long secondary connection attempts.
+- **SMTP scan latency**: SMTP probing now reuses the already-open connection where possible and avoids slow duplicate probes.
+- **Stale external-tool evidence**: README examples and output golden tests no longer reference removed `nmap`/`smbclient` evidence paths.
 
 ## [2.4.7] - 2026-04-30
 
 ### Added
 - **Richer service fingerprinting**: TCP service detection now includes generic probes for services exposed on non-standard ports.
 - **ONC RPC/NFS detection**: `-s` can now identify `rpcbind`, `nfs`, `mountd`, `nlockmgr`, `rpc.statd`, and related dynamic RPC services.
-- **SMB/Samba detection**: SMB fingerprinting now uses anonymous `smbclient` and `rpcclient` signals when available to identify Samba server comments and share banners.
+- **SMB/Samba detection**: SMB fingerprinting now uses native raw SMB negotiation and the Go SMB client library without shelling out to external tools.
 
 ### Changed
 - **FTP banner probing**: FTP detection now waits longer for slow greetings, sends `SYST`, `FEAT`, and `HELP`, and prefers product banners such as `InFreight FTP v1.1` over generic protocol hints.
-- **SMB fallback behavior**: nmap SMB output no longer defaults to `Microsoft Windows` when it only reports protocol dialects.
+- **SMB fallback behavior**: SMB output no longer defaults to `Microsoft Windows` when native probes only confirm that the service is open.
 
 ### Fixed
 - **SMTP vs FTP ambiguity**: `220 ... ESMTP` banners are no longer misclassified as FTP.
@@ -261,7 +279,7 @@ Note: this changelog is maintained from this point forward in the project histor
 
 ---
 
-## [2.0] - 2026-02-02
+## [2.0.0] - 2026-02-02
 
 ### Added
 - **Performance Optimizations**
@@ -302,7 +320,7 @@ Note: this changelog is maintained from this point forward in the project histor
 
 ---
 
-## [1.0] - 2026-01-15
+## [1.0.0] - 2026-01-15
 
 ### Added
 - Initial public release
@@ -331,8 +349,14 @@ This project follows [Semantic Versioning](https://semver.org/):
 - **MINOR** (0.X.0): New features (backwards compatible)
 - **PATCH** (0.0.X): Bug fixes (backwards compatible)
 
-### Version History
-- **1.0.0** - Initial release with basic features
-- **2.0.0** - Major improvements (performance, CIDR, host discovery)
-- **2.0.2** - Current (go.mod fix for go install)
-- **2.0.1** - Colorized output, installation improvements
+### Recent Version History
+- **2.4.8** - Native service-detection fixes, bounded probes, clearer silent-service reporting, and updated HTB benchmarks.
+- **2.4.7** - Richer service fingerprinting for FTP, ONC RPC/NFS, SMB/Samba, and related port-map fallbacks.
+- **2.4.6** - UDP scan mode and responsive UDP service classification.
+- **2.4.4** - Installation doctor and safer cleanup flows for multiple installed copies.
+- **2.4.0** - Selectable `connect`/`syn` scan engines with native SYN discovery.
+- **2.3.0** - Professional CLI help, structured version output, and low-noise profile refinements.
+- **2.2.0** - Go module path migrated to `github.com/NexusFireMan/gomap/v2`.
+- **2.1.0** - Structured output formats, exposure summaries, robust scan controls, and CI/release pipeline.
+- **2.0.0** - Major performance, CIDR, host discovery, and service-detection improvements.
+- **1.0.0** - Initial public release.

@@ -31,7 +31,7 @@
 - [Example Output](#example-output)
 - [CLI Reference](#cli-reference)
 - [Detection Realism (`-s`)](#detection-realism--s)
-- [IDS Noise Benchmark (Lab)](#ids-noise-benchmark-lab)
+- [HTB Performance Benchmark (Lab)](#htb-performance-benchmark-lab)
 - [Output Formats](#output-formats)
 - [Responsible Use](#responsible-use)
 - [Quick Links](#quick-links)
@@ -222,8 +222,8 @@ $ gomap -s --details -p 21,22,80,139,445 10.0.11.6
 PORT    STATE  SERVICE         VERSION                              LAT(ms) CONF     EVIDENCE
 21      open   ftp             InFreight FTP v1.1                   73      high     protocol banner
 22      open   ssh             SSH-2.0 - OpenSSH 8.2p1 Ubuntu       80      high     protocol banner
-139     open   netbios-ssn     Samba server (Ubuntu)                78      high     smbclient anonymous
-445     open   microsoft-ds    Samba server (Ubuntu)                82      high     smbclient anonymous
+139     open   netbios-ssn     SMB 2.1-3.1.1                       78      high     raw smb negotiate
+445     open   microsoft-ds    SMB 2.1-3.1.1                       82      high     raw smb negotiate
 
 Host Exposure Summary
 - 10.0.11.6 | open ports: 4 | critical: ftp, microsoft-ds, ssh | exposure: high
@@ -313,49 +313,86 @@ Non-standard port note:
 
 Note: `--random-ip` randomizes HTTP headers only; it does not spoof the real TCP source IP.
 
-## IDS Noise Benchmark (Lab)
+## HTB Performance Benchmark (Lab)
 
-Benchmark executed on **March 9, 2026** with:
+Benchmark executed on **May 13, 2026** against an authorized Hack The Box lab target.
 
-- Scanner host: `10.0.11.11`
-- Targets: `10.0.11.0/24` (Windows `10.0.11.6`, Linux `10.0.11.9`, Snort `10.0.11.8`)
-- IDS: Snort `2.9.20` (`10.0.11.8`)
-- Port set: `22,80,139,445,3389,5985`
-- Log analyzed: `/var/log/snort/snort.alert.fast`
-- Attribution filter: source `10.0.11.11`
+- Scanner host: Kali Linux, kernel `6.19.14+kali-amd64`
+- Go toolchain: `go1.26.2 linux/amd64`
+- GoMap binary: local build from the current working tree
+- Target: `10.129.109.169` (private HTB lab address)
+- Profile: CONNECT scan with service/version detection
+- Quick profile command: `gomap -s 10.129.109.169`
+- Full-port profile command: `gomap -s -p - 10.129.109.169`
+- Quick profile runs: `5`
+- Full-port profile runs: `4`
 
-Commands compared:
+Quick profile duration (`996` TCP ports):
 
-```bash
-# CONNECT normal
-gomap -s -p 22,80,139,445,3389,5985 10.0.11.0/24
+| Run | Duration | Hosts scanned | Open ports found |
+|---:|---:|---:|---:|
+| 1 | 2.251s | 1 | 8 |
+| 2 | 2.220s | 1 | 8 |
+| 3 | 2.245s | 1 | 8 |
+| 4 | 2.095s | 1 | 8 |
+| 5 | 2.205s | 1 | 8 |
 
-# CONNECT low-noise (`-g` ghost mode)
-gomap -g -s --random-agent --random-ip -p 22,80,139,445,3389,5985 10.0.11.0/24
+Quick profile summary:
 
-# SYN normal (native, requires root/CAP_NET_RAW)
-sudo gomap --scan-type syn -s -p 22,80,139,445,3389,5985 10.0.11.0/24
+| Metric | Duration |
+|---|---:|
+| Min | 2.095s |
+| Max | 2.251s |
+| Mean | 2.203s |
+| Median | 2.220s |
 
-# SYN low-noise (`-g` ghost mode)
-sudo gomap -g -s --scan-type syn --random-agent --random-ip -p 22,80,139,445,3389,5985 10.0.11.0/24
+Full-port profile duration (`65,535` TCP ports):
+
+| Run | Duration | Hosts scanned | Open ports found |
+|---:|---:|---:|---:|
+| 1 | 44.128s | 1 | 9 |
+| 2 | 60.632s | 1 | 9 |
+| 3 | 58.315s | 1 | 8 |
+| 4 | 58.404s | 1 | 9 |
+
+Full-port profile summary:
+
+| Metric | Duration |
+|---|---:|
+| Min | 44.128s |
+| Max | 60.632s |
+| Mean | 55.370s |
+| Median | 58.359s |
+
+Representative quick profile output:
+
+```text
+PORT    STATE  SERVICE         VERSION
+22      open   ssh             SSH-2.0 - OpenSSH 8.2p1 Ubuntu-4ubuntu0.3
+25      open   smtp            SMTP service (no greeting)
+53      open   domain          BIND 9.16.1-Ubuntu
+110     open   pop3            InFreight POP3 v9.188
+143     open   imap            IMAP4rev1
+993     open   imap            IMAP4rev1
+995     open   pop3            InFreight POP3 v9.188
+3306    open   mysql           MySQL service (no handshake)
+
+Host Exposure Summary
+- 10.129.109.169 | open ports: 8 | critical: mysql, ssh | exposure: medium
 ```
 
-Observed results (single run per profile):
+Representative full-port additional finding:
 
-| Profile | Duration | Hosts scanned | Open ports found | New alerts (all) | New alerts from scanner IP | New TCP alerts from scanner IP |
-|---|---:|---:|---:|---:|---:|---:|
-| CONNECT normal | 6.801s | 4 | 10 | 97 | 97 | 96 |
-| CONNECT low-noise (`-g`) | 10.893s | 3 | 9 | 64 | 64 | 62 |
-| SYN normal | 9.26s | 4 | 10 | 104 | 104 | 103 |
-| SYN low-noise (`-g`) | 11.793s | 3 | 9 | 48 | 48 | 47 |
+```text
+33060   open   mysqlx          MySQL X Protocol service
+```
 
-Takeaways:
+Notes:
 
-- The controlled-rate low-noise profile (`-g`, historically named ghost mode) reduced scanner-attributed TCP alerts in both engines:
-  - CONNECT: `96 -> 62` (about `-35.4%`)
-  - SYN: `103 -> 47` (about `-54.4%`)
-- In this Snort rule set, SYN generated more alerts than CONNECT for the same target/ports.
-- Low-noise CIDR discovery is intentionally conservative and may scan fewer active hosts (`3` vs `4` in this run).
+- `SMTP service (no greeting)` means the TCP port is open, but the server did not return an SMTP greeting within GoMap's bounded service-detection window.
+- `MySQL service (no handshake)` means the TCP port is open, but the server did not emit a standard MySQL handshake, so GoMap reports the service without inventing a product version.
+- The full-port profile found `33060/mysqlx`, which is outside the default quick scan set.
+- HTB lab latency and VPN conditions can change; treat these numbers as a practical reference point, not a universal guarantee.
 
 ## Output Formats
 

@@ -36,7 +36,7 @@ func sampleResults() ([]string, map[string][]scanner.ScanResult) {
 				Version:       "Windows Server 2008 R2",
 				LatencyMs:     3,
 				Confidence:    "high",
-				Evidence:      "nmap smb-os-discovery",
+				Evidence:      "raw smb negotiate",
 				DetectionPath: "smb-specialized",
 			},
 		},

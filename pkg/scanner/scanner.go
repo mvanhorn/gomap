@@ -1,7 +1,6 @@
 package scanner
 
 import (
-	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -9,7 +8,6 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
@@ -288,6 +286,14 @@ func (s *Scanner) ioTimeout(min time.Duration) time.Duration {
 	return timeout
 }
 
+func (s *Scanner) boundedServiceTimeout(min, max time.Duration) time.Duration {
+	timeout := s.ioTimeout(min)
+	if max > 0 && timeout > max {
+		return max
+	}
+	return timeout
+}
+
 func (s *Scanner) recordDialOutcome(dialErr error, latency time.Duration) {
 	s.adaptiveMu.Lock()
 	defer s.adaptiveMu.Unlock()
@@ -413,67 +419,45 @@ func (s *Scanner) addJitter() {
 	time.Sleep(minDelay + delay)
 }
 
-// tryExternalSMBDetection attempts to use nmap scripts for SMB detection.
-func tryExternalSMBDetection(host string) (string, string) {
-	if nmapPath, err := exec.LookPath("nmap"); err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		cmd := exec.CommandContext(ctx, nmapPath, "-p", "139,445", "--script", "smb-os-discovery,smb-protocols", "-n", "-Pn", host)
-		output, err := cmd.CombinedOutput()
-		if err == nil {
-			result := string(output)
-			if strings.Contains(result, "Windows Server 2008 R2") {
-				return "Windows Server 2008 R2", "nmap smb-os-discovery"
-			} else if strings.Contains(result, "Windows Server 2012") {
-				return "Windows Server 2012", "nmap smb-os-discovery"
-			} else if strings.Contains(result, "Windows Server 2016") {
-				return "Windows Server 2016", "nmap smb-os-discovery"
-			} else if strings.Contains(result, "Windows Server 2019") {
-				return "Windows Server 2019", "nmap smb-os-discovery"
-			} else if strings.Contains(result, "Windows 7") {
-				return "Windows 7", "nmap smb-os-discovery"
-			} else if strings.Contains(result, "Windows 10") {
-				return "Windows 10", "nmap smb-os-discovery"
-			} else if strings.Contains(result, "Samba") {
-				if strings.Contains(result, "3.X - 4.X") || strings.Contains(result, "3.x - 4.x") {
-					return "Samba smbd 3.X-4.X", "nmap smb-os-discovery"
-				} else if strings.Contains(result, "3.") {
-					return "Samba smbd 3.X", "nmap smb-os-discovery"
-				} else if strings.Contains(result, "4.") {
-					return "Samba smbd 4.X", "nmap smb-os-discovery"
-				}
-				return "Samba smbd", "nmap smb-os-discovery"
-			}
-			if dialects := parseNmapSMBProtocols(result); dialects != "" {
-				return dialects, "nmap smb-protocols"
-			}
-		}
-	}
-
-	return "", ""
-}
-
-func parseNmapSMBProtocols(out string) string {
-	var dialects []string
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.Trim(strings.TrimSpace(line), "|_ ")
-		if regexp.MustCompile(`^\d+\.\d+(?:\.\d+)?$`).MatchString(line) {
-			dialects = append(dialects, line)
-		}
-	}
-	if len(dialects) == 0 {
-		return ""
-	}
-	if len(dialects) == 1 {
-		return "SMB " + dialects[0]
-	}
-	return fmt.Sprintf("SMB %s-%s", dialects[0], dialects[len(dialects)-1])
-}
-
 // grabBanner attempts to grab the service banner
 func (s *Scanner) grabBanner(conn net.Conn, port int, result *ScanResult) {
 	var banner string
+
+	if !s.GhostMode && port == 3306 {
+		if version := detectMySQLHandshakeFromConn(conn, s.boundedServiceTimeout(1200*time.Millisecond, 2500*time.Millisecond)); version != "" {
+			result.ServiceName = "mysql"
+			result.Version = version
+			result.Confidence = "high"
+			result.Evidence = "mysql handshake"
+			result.DetectionPath = "protocol-fingerprint"
+			return
+		}
+		result.ServiceName = "mysql"
+		result.Version = "MySQL service (no handshake)"
+		result.Confidence = "low"
+		result.Evidence = "port open; no mysql handshake"
+		result.DetectionPath = "mysql-portmap"
+		return
+	}
+	if !s.GhostMode && port == 33060 {
+		result.ServiceName = "mysqlx"
+		result.Version = "MySQL X Protocol service"
+		result.Confidence = "low"
+		result.Evidence = "port map"
+		result.DetectionPath = "portmap"
+		return
+	}
+
+	if !s.GhostMode {
+		if service, ver, confidence, evidence, path, ok := s.tryProtocolFingerprint(port); ok {
+			result.ServiceName = service
+			result.Version = ver
+			result.Confidence = confidence
+			result.Evidence = evidence
+			result.DetectionPath = path
+			return
+		}
+	}
 
 	// For HTTP ports, send active request first
 	if shouldParseAsHTTP(port) && !s.GhostMode {
@@ -485,19 +469,25 @@ func (s *Scanner) grabBanner(conn net.Conn, port int, result *ScanResult) {
 		banner = s.tryPassiveBanner(conn)
 	}
 
+	if banner == "" && !s.GhostMode {
+		if connectedBanner, attempted := s.tryConnectedTextProbe(conn, port); attempted {
+			banner = connectedBanner
+			if banner == "" {
+				result.ServiceName = s.PortManager.GetServiceName(port, "")
+				if result.ServiceName != "" {
+					result.Version = noGreetingVersionForPort(port)
+					result.Confidence = "low"
+					result.Evidence = noGreetingEvidenceForPort(port)
+					result.DetectionPath = "connected-probe"
+				}
+				return
+			}
+		}
+	}
+
 	// If still no banner, use active probes only outside ghost mode.
 	if banner == "" && !s.GhostMode {
 		banner = s.tryServiceProbe(port)
-	}
-	if banner == "" && !s.GhostMode {
-		if service, ver, confidence, evidence, path, ok := s.tryProtocolFingerprint(port); ok {
-			result.ServiceName = service
-			result.Version = ver
-			result.Confidence = confidence
-			result.Evidence = evidence
-			result.DetectionPath = path
-			return
-		}
 	}
 	if banner == "" && !s.GhostMode && s.PortManager.GetServiceName(port, "") == "" {
 		banner = s.tryGenericServiceProbes(port)
@@ -617,6 +607,21 @@ func (s *Scanner) grabBanner(conn net.Conn, port int, result *ScanResult) {
 			}
 		}
 	} else {
+		if !s.GhostMode && shouldRetryMappedTextProbe(port, result.ServiceName) {
+			if retryBanner := s.tryServiceProbe(port); retryBanner != "" {
+				if retryService, retryVersion := parseBanner(retryBanner); retryService != "" {
+					result.ServiceName = retryService
+					result.Version = retryVersion
+					result.Confidence = "high"
+					if retryVersion == "" {
+						result.Confidence = "medium"
+					}
+					result.Evidence = "protocol probe"
+					result.DetectionPath = "active-probe"
+					return
+				}
+			}
+		}
 		if !s.GhostMode {
 			if service, ver, confidence, evidence, path, ok := s.tryProtocolFingerprint(port); ok {
 				result.ServiceName = service
@@ -642,6 +647,71 @@ func isLikelyHTTPProxyPort(port int) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func shouldRetryMappedTextProbe(port int, currentService string) bool {
+	if currentService != "" {
+		return false
+	}
+	switch port {
+	case 25, 110, 143, 465, 587, 993, 995:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Scanner) tryConnectedTextProbe(conn net.Conn, port int) (string, bool) {
+	switch port {
+	case 25, 587, 2525:
+		return s.probeTextServiceOnConn(conn, "EHLO gomap.local\r\n"), true
+	case 110:
+		return s.probeTextServiceOnConn(conn, "CAPA\r\n"), true
+	case 143:
+		return s.probeTextServiceOnConn(conn, "a001 CAPABILITY\r\n"), true
+	default:
+		return "", false
+	}
+}
+
+func (s *Scanner) probeTextServiceOnConn(conn net.Conn, payload string) string {
+	timeout := s.boundedServiceTimeout(900*time.Millisecond, 1800*time.Millisecond)
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		return ""
+	}
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil || n == 0 {
+		return ""
+	}
+	return string(buf[:n])
+}
+
+func noGreetingVersionForPort(port int) string {
+	switch port {
+	case 25, 465, 587, 2525:
+		return "SMTP service (no greeting)"
+	case 110, 995:
+		return "POP3 service (no greeting)"
+	case 143, 993:
+		return "IMAP service (no greeting)"
+	default:
+		return ""
+	}
+}
+
+func noGreetingEvidenceForPort(port int) string {
+	switch port {
+	case 25, 465, 587, 2525:
+		return "port open; no smtp greeting"
+	case 110, 995:
+		return "port open; no pop3 greeting"
+	case 143, 993:
+		return "port open; no imap greeting"
+	default:
+		return "port open; no greeting"
 	}
 }
 
@@ -726,11 +796,11 @@ func (s *Scanner) tryServiceProbe(port int) string {
 	case 21:
 		return s.probeFTP(port)
 	case 25, 465, 587, 2525:
-		return s.probeTextService(port, "EHLO gomap.local\r\n")
+		return s.probeMailService(port, "EHLO gomap.local\r\n", port == 465)
 	case 110, 995:
-		return s.probeTextService(port, "CAPA\r\n")
+		return s.probeMailService(port, "CAPA\r\n", port == 995)
 	case 143, 993:
-		return s.probeTextService(port, "a001 CAPABILITY\r\n")
+		return s.probeMailService(port, "a001 CAPABILITY\r\n", port == 993)
 	case 6379:
 		return s.probeTextService(port, "INFO\r\n")
 	case 8009:
@@ -772,6 +842,48 @@ func (s *Scanner) probeFTP(port int) string {
 			response.WriteByte('\n')
 		}
 	}
+	return response.String()
+}
+
+func (s *Scanner) probeMailService(port int, payload string, useTLS bool) string {
+	address := net.JoinHostPort(s.Host, fmt.Sprintf("%d", port))
+	timeout := s.boundedServiceTimeout(1200*time.Millisecond, 2500*time.Millisecond)
+
+	var (
+		conn net.Conn
+		err  error
+	)
+	if useTLS {
+		dialer := &net.Dialer{Timeout: timeout}
+		conn, err = tls.DialWithDialer(dialer, "tcp", address, &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         s.Host,
+		})
+	} else {
+		conn, err = net.DialTimeout("tcp", address, timeout)
+	}
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	var response strings.Builder
+	buf := make([]byte, 4096)
+
+	if n, err := conn.Read(buf); err == nil && n > 0 {
+		response.Write(buf[:n])
+		response.WriteByte('\n')
+	}
+
+	if payload != "" {
+		_, _ = conn.Write([]byte(payload))
+		if n, err := conn.Read(buf); err == nil && n > 0 {
+			response.Write(buf[:n])
+			response.WriteByte('\n')
+		}
+	}
+
 	return response.String()
 }
 
@@ -861,6 +973,10 @@ func (s *Scanner) probeTextServiceWriteFirst(port int, payload string) string {
 // tryProtocolFingerprint performs protocol-aware detection for services that often need active handshakes.
 func (s *Scanner) tryProtocolFingerprint(port int) (service, version, confidence, evidence, path string, ok bool) {
 	switch port {
+	case 53:
+		if version = s.detectDNSVersionTCP(port); version != "" {
+			return "domain", version, "high", "dns chaos version.bind", "protocol-fingerprint", true
+		}
 	case 111:
 		if ver, detected := s.detectONCRPCProgram(port, 100000, []uint32{4, 3, 2}); detected {
 			return "rpcbind", fmt.Sprintf("rpcbind v%d", ver), "high", "onc rpc null call", "protocol-fingerprint", true
@@ -868,10 +984,6 @@ func (s *Scanner) tryProtocolFingerprint(port int) (service, version, confidence
 	case 2049:
 		if ver, detected := s.detectONCRPCProgram(port, 100003, []uint32{4, 3, 2}); detected {
 			return "nfs", fmt.Sprintf("NFS v%d", ver), "high", "onc rpc null call", "protocol-fingerprint", true
-		}
-	case 3306:
-		if version = s.detectMySQLHandshake(port); version != "" {
-			return "mysql", version, "high", "mysql handshake", "protocol-fingerprint", true
 		}
 	case 1433:
 		if s.detectMSSQLTDS(port) {
@@ -1067,11 +1179,11 @@ func (s *Scanner) probeAJP(port int) string {
 	return ""
 }
 
-func (s *Scanner) detectMySQLHandshake(port int) string {
+func (s *Scanner) detectDNSVersionTCP(port int) string {
 	address := net.JoinHostPort(s.Host, fmt.Sprintf("%d", port))
-	timeout := s.ioTimeout(1200 * time.Millisecond)
-	if timeout < 1200*time.Millisecond {
-		timeout = 1200 * time.Millisecond
+	timeout := s.ioTimeout(1500 * time.Millisecond)
+	if timeout < 1500*time.Millisecond {
+		timeout = 1500 * time.Millisecond
 	}
 
 	conn, err := net.DialTimeout("tcp", address, timeout)
@@ -1080,6 +1192,90 @@ func (s *Scanner) detectMySQLHandshake(port int) string {
 	}
 	defer func() { _ = conn.Close() }()
 
+	query := buildDNSVersionBindQuery()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := conn.Write(query); err != nil {
+		return ""
+	}
+
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil || n < 14 {
+		return ""
+	}
+	return parseDNSVersionBindResponse(buf[:n])
+}
+
+func buildDNSVersionBindQuery() []byte {
+	payload := []byte{
+		0x13, 0x37, // ID
+		0x01, 0x00, // standard query, recursion desired
+		0x00, 0x01, // QDCOUNT
+		0x00, 0x00, // ANCOUNT
+		0x00, 0x00, // NSCOUNT
+		0x00, 0x00, // ARCOUNT
+		0x07, 'v', 'e', 'r', 's', 'i', 'o', 'n',
+		0x04, 'b', 'i', 'n', 'd',
+		0x00,
+		0x00, 0x10, // TXT
+		0x00, 0x03, // CH
+	}
+	msg := make([]byte, 2+len(payload))
+	binary.BigEndian.PutUint16(msg[0:2], uint16(len(payload)))
+	copy(msg[2:], payload)
+	return msg
+}
+
+func parseDNSVersionBindResponse(data []byte) string {
+	if len(data) < 2 {
+		return ""
+	}
+	msgLen := int(binary.BigEndian.Uint16(data[0:2]))
+	if msgLen <= 0 || 2+msgLen > len(data) {
+		return ""
+	}
+	msg := data[2 : 2+msgLen]
+	if len(msg) < 12 || binary.BigEndian.Uint16(msg[0:2]) != 0x1337 {
+		return ""
+	}
+	answerCount := int(binary.BigEndian.Uint16(msg[6:8]))
+	offset := 12
+	for offset < len(msg) && msg[offset] != 0 {
+		offset += int(msg[offset]) + 1
+	}
+	offset += 1 + 4
+	for i := 0; i < answerCount && offset+12 <= len(msg); i++ {
+		if msg[offset]&0xc0 == 0xc0 {
+			offset += 2
+		} else {
+			for offset < len(msg) && msg[offset] != 0 {
+				offset += int(msg[offset]) + 1
+			}
+			offset++
+		}
+		if offset+10 > len(msg) {
+			return ""
+		}
+		typ := binary.BigEndian.Uint16(msg[offset : offset+2])
+		class := binary.BigEndian.Uint16(msg[offset+2 : offset+4])
+		rdLen := int(binary.BigEndian.Uint16(msg[offset+8 : offset+10]))
+		offset += 10
+		if offset+rdLen > len(msg) {
+			return ""
+		}
+		rdata := msg[offset : offset+rdLen]
+		offset += rdLen
+		if typ == 16 && class == 3 && len(rdata) > 1 {
+			txtLen := int(rdata[0])
+			if txtLen > 0 && 1+txtLen <= len(rdata) {
+				return "BIND " + sanitizeVersionString(string(rdata[1:1+txtLen]))
+			}
+		}
+	}
+	return ""
+}
+
+func detectMySQLHandshakeFromConn(conn net.Conn, timeout time.Duration) string {
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	buf := make([]byte, 512)
 	n, err := conn.Read(buf)
@@ -1087,12 +1283,16 @@ func (s *Scanner) detectMySQLHandshake(port int) string {
 		return ""
 	}
 
+	return parseMySQLHandshakePacket(buf[:n])
+}
+
+func parseMySQLHandshakePacket(packet []byte) string {
 	// MySQL packet: [3-byte len][1-byte seq][protocol=0x0a][version string...]
-	if buf[4] != 0x0a {
+	if len(packet) < 7 || packet[4] != 0x0a {
 		return ""
 	}
 
-	payload := string(buf[5:n])
+	payload := string(packet[5:])
 	end := strings.IndexByte(payload, 0x00)
 	if end <= 0 {
 		return "MySQL"
@@ -1263,135 +1463,15 @@ func (s *Scanner) detectWinRM(port int) string {
 func (s *Scanner) detectSMBVersion(port int) (string, string) {
 	address := net.JoinHostPort(s.Host, fmt.Sprintf("%d", port))
 
-	if external := trySMBClientDetection(s.Host); external != "" {
-		return external, "smbclient anonymous"
-	}
-
-	if external := tryRPCClientSrvInfo(s.Host); external != "" {
-		return external, "rpcclient srvinfo"
-	}
-
-	if external, method := tryExternalSMBDetection(s.Host); external != "" {
-		return external, method
-	}
-
-	// Method 2: Try to detect by reading raw SMB response
 	if rawSMB := s.attemptRawSMBDetection(address); rawSMB != "" {
 		return rawSMB, "raw smb negotiate"
 	}
 
-	// Method 3: Try SMB library
 	if smbLib := s.attemptSMBLibrary(address); smbLib != "" {
 		return smbLib, "smb library"
 	}
 
-	// Default: we know port is open
-	return "Microsoft Windows SMB", "port 445 open"
-}
-
-func trySMBClientDetection(host string) string {
-	smbclientPath, err := exec.LookPath("smbclient")
-	if err != nil {
-		return ""
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, smbclientPath, "-L", "//"+host, "-N", "-g", "-m", "SMB3")
-	output, err := cmd.CombinedOutput()
-	if err != nil && len(output) == 0 {
-		return ""
-	}
-	return parseSMBClientOutput(string(output))
-}
-
-func tryRPCClientSrvInfo(host string) string {
-	rpcclientPath, err := exec.LookPath("rpcclient")
-	if err != nil {
-		return ""
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, rpcclientPath, "-U", "", "-N", host, "-c", "srvinfo")
-	output, err := cmd.CombinedOutput()
-	if err != nil && len(output) == 0 {
-		return ""
-	}
-	return parseRPCClientSrvInfo(string(output))
-}
-
-func parseSMBClientOutput(out string) string {
-	lines := strings.Split(out, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if server := extractSMBServerComment(line); server != "" {
-			return server
-		}
-	}
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "Disk|") {
-			continue
-		}
-		parts := strings.SplitN(line, "|", 3)
-		if len(parts) == 3 && strings.TrimSpace(parts[2]) != "" {
-			return fmt.Sprintf("SMB share %s: %s", strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2]))
-		}
-	}
-	return ""
-}
-
-func extractSMBServerComment(line string) string {
-	if strings.Contains(line, "IPC Service (") {
-		start := strings.Index(line, "IPC Service (")
-		if start >= 0 {
-			server := line[start+len("IPC Service ("):]
-			server = strings.TrimSuffix(server, ")")
-			return normalizeSMBServerVersion(server)
-		}
-	}
-	lower := strings.ToLower(line)
-	if strings.Contains(lower, "samba ") || strings.Contains(lower, "(samba") || strings.Contains(lower, " samba,") {
-		return normalizeSMBServerVersion(line)
-	}
-	return ""
-}
-
-func parseRPCClientSrvInfo(out string) string {
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "platform_id") || strings.HasPrefix(line, "os version") || strings.HasPrefix(line, "server type") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		for i, field := range fields {
-			if field == "SNT" && i+1 < len(fields) {
-				return normalizeSMBServerVersion(strings.Join(fields[i+1:], " "))
-			}
-		}
-		if strings.Contains(strings.ToLower(line), "samba") {
-			return normalizeSMBServerVersion(line)
-		}
-	}
-	return ""
-}
-
-func normalizeSMBServerVersion(version string) string {
-	version = sanitizeVersionString(version)
-	version = strings.TrimSpace(version)
-	if version == "" {
-		return ""
-	}
-	return version
+	return "SMB service", "port open"
 }
 
 func shouldUseTLSForHTTP(port int) bool {
